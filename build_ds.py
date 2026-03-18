@@ -1,9 +1,4 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
+# %%
 from __future__ import print_function, division
 import os
 import torch
@@ -30,6 +25,7 @@ import tifffile
 from shapely.wkt import loads
 from shapely.geometry import Polygon
 from tqdm import tqdm
+import functools
 
 random.seed(42)
 npr.seed(42)
@@ -42,17 +38,12 @@ warnings.filterwarnings("ignore")
 plt.ion()   # interactive mode
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
-
-
-# In[2]:
-
-
+# %%
 import os
 
 # Especifica el directorio donde están las imágenes
 directorio = "./xBD_UC3M"
-
-
+# %% [markdown]
 # ### Clase Dataset
 # 
 # La clase ``torch.utils.data.Dataset`` es una clase abstracta que representa un dataset.
@@ -69,42 +60,36 @@ directorio = "./xBD_UC3M"
 # Cada muestra de nuestro dataset (cuando invoquemos dataset[i]) va a ser un diccionario.
 # 
 # Por otro lado, al definir el dataset, el constructor podrá también tomar un argumento opcional ``transform`` para que podamos añadir pre-procesado y técnicas de data augmentation que le aplicaremos a las imágenes cuando las solicitemos.
+# %%
+from torch.utils.data import Dataset
+from PIL import Image
+from natsort import natsorted
+import os
+import numpy as np
 
-# In[3]:
-
-
-class xBDDataset(Dataset):
+class CroppedxBDDataset(Dataset):
     def __init__(self, data_dir, split=['train'], patch_size=64, transform=None, max_size=0):
         self.data_dir = data_dir
+        if isinstance(split, str):
+            split = [split]
         self.split = split
-        self.patch_size = patch_size
         self.transform = transform
-        self.max_size = max_size
 
-        self.image_pre_files = []
-        self.image_post_files = []
-        self.label_pre_files = []
-        self.label_post_files = []
+        self.image_files =[]
+        # Leemos los paths de los parches creados
         for s in split:
-            disaster_dirs = os.listdir(os.path.join(data_dir, s))
+            split_dir = os.path.join(data_dir, s)
+            # natsorted asegura que 000000, 000001 mantienen el orden estricto para el Test
+            files = natsorted([f for f in os.listdir(split_dir) if f.endswith('.png')])
+            if 'test' not in split:
+                files = [f for f in files if not f.endswith('_-1.png')]
+            self.image_files.extend([os.path.join(s, f) for f in files])
 
-            for d in disaster_dirs:
-                image_files = os.listdir(os.path.join(data_dir, s, d, 'images'))
-                labels_files = os.listdir(os.path.join(data_dir, s, d, 'labels'))
-                self.image_pre_files.append(natsorted([os.path.join(data_dir, s, d, 'images', f) \
-                                        for f in image_files if 'pre' in f]))
-                self.image_post_files.append(natsorted([os.path.join(data_dir, s, d, 'images', f) \
-                                        for f in image_files if 'post' in f]))
-                self.label_pre_files.append(natsorted([os.path.join(data_dir, s, d, 'labels', f) \
-                                        for f in labels_files if 'pre' in f]))
-                self.label_post_files.append(natsorted([os.path.join(data_dir, s, d, 'labels', f) \
-                                        for f in labels_files if 'post' in f]))
-        self.image_pre_files = natsorted(np.hstack(self.image_pre_files))
-        self.image_post_files = natsorted(np.hstack(self.image_post_files))
-        self.label_pre_files = natsorted(np.hstack(self.label_pre_files))
-        self.label_post_files = natsorted(np.hstack(self.label_post_files))
+        # Misma lógica de pseudo-barajado que tenías por si usas max_size
+        if max_size > 0:
+            idx = np.random.RandomState(seed=42).permutation(range(len(self.image_files)))
+            self.image_files = [self.image_files[i] for i in idx[:max_size]]
 
-        print(split)
         self.damage_classes = {
             'no-damage': 0,
             'minor-damage': 1,
@@ -112,248 +97,100 @@ class xBDDataset(Dataset):
             'destroyed': 3
         }
 
-        self.patches = []
-        self.patch_labels = []
-        self._get_patches_data()
-        self._print_class_distribution()
-
-    def _process_image(self, idx):
-        image_pre = tifffile.imread(self.patch_image_pre[idx])
-        if image_pre.shape[:2] != (1024, 1024):
-            image_pre = cv2.resize(image_pre, (1024, 1024))
-
-        image_post = tifffile.imread(self.patch_image_post[idx])
-        if image_post.shape[:2] != (1024, 1024):
-            image_post = cv2.resize(image_post, (1024, 1024))
-
-        return image_pre, image_post #, mask_pre
-
-    def _create_mask(self, label_path):
-        mask = np.zeros((1024, 1024), dtype=np.uint8)
-
-        try:
-            with open(label_path, 'r') as f:
-                data = json.load(f)
-
-            if 'features' in data and 'xy' in data['features']:
-                features = data['features']['xy']
-
-                for feature in features:
-                    if 'wkt' in feature:
-                        try:
-                            geom = loads(feature['wkt'])
-                            if isinstance(geom, Polygon) and geom.is_valid:
-                                coords = np.array(geom.exterior.coords, dtype=np.int32)
-                                cv2.fillPoly(mask, [coords], 1)
-                        except:
-                            continue
-        except:
-            pass
-
-        return mask
-
-    def _get_patches_data(self):
-        num_files = len(self.image_pre_files)
-        self.patch_pre = []
-        self.patch_post = []
-        self.label_pre = []
-        self.label_post = []
-        self.label_post_path = []
-        self.patch_image_pre = []
-        self.patch_image_post = []
-
-        for n in np.arange(num_files):
-            label_pre_path = self.label_pre_files[n]
-            label_post_path = self.label_post_files[n]
-
-            with open(label_pre_path, 'r') as f_pre, open(label_post_path, 'r') as f_post:
-                data_pre = json.load(f_pre)
-                data_post = json.load(f_post)
-
-                if 'features' in data_post and 'xy' in data_post['features']:
-                    features_post = data_post['features']['xy']
-
-                    for feature in features_post:
-                        if 'wkt' in feature and 'properties' in feature:
-                            props = feature['properties']
-                            if props.get('feature_type') == 'building':
-                                damage_type = props.get('subtype', 'no-damage')
-
-                                if damage_type in self.damage_classes or damage_type == -1:
-                                    self.patch_pre.append(feature['wkt'])
-                                    self.patch_post.append(feature['wkt'])
-                                    self.label_pre.append(0) # No damage before the event
-                                    self.label_post.append(self.damage_classes[damage_type] if damage_type in self.damage_classes else -1)
-                                    self.label_post_path.append(label_post_path)
-                                    self.patch_image_pre.append(self.image_pre_files[n])
-                                    self.patch_image_post.append(self.image_post_files[n])
-
-        if self.max_size > 0:
-            new_dataset_size = self.max_size
-            idx = np.random.RandomState(seed=42).permutation(range(len(self.patch_pre)))
-            self.patch_pre = np.array(self.patch_pre)[idx[0:new_dataset_size]]
-            self.patch_post = np.array(self.patch_post)[idx[0:new_dataset_size]]
-            self.label_pre = np.array(self.label_pre)[idx[0:new_dataset_size]]
-            self.label_post = np.array(self.label_post)[idx[0:new_dataset_size]]
-            self.label_post_path = np.array(self.label_post_path)[idx[0:new_dataset_size]]
-            self.patch_image_pre = np.array(self.patch_image_pre)[idx[0:new_dataset_size]]
-            self.patch_image_post = np.array(self.patch_image_post)[idx[0:new_dataset_size]]
-
-    def _extract_patch(self, image, mask, wkt_str):
-        geom = loads(wkt_str)
-        if isinstance(geom, Polygon) and geom.is_valid:
-            coords = np.array(geom.exterior.coords, dtype=np.int32)
-
-            x_min, y_min = coords.min(axis=0)
-            x_max, y_max = coords.max(axis=0)
-
-            center_x = (x_min + x_max) // 2
-            center_y = (y_min + y_max) // 2
-
-            half_size = self.patch_size // 2
-
-            x1 = max(0, center_x - half_size)
-            y1 = max(0, center_y - half_size)
-            x2 = min(image.shape[1], center_x + half_size)
-            y2 = min(image.shape[0], center_y + half_size)
-
-            patch = image[y1:y2, x1:x2]
-            if mask is not None:
-                mask_patch = mask[y1:y2, x1:x2]
-            else:
-                mask_patch = None
-
-            if patch.shape[0] > 0 and patch.shape[1] > 0:
-                patch = cv2.resize(patch, (self.patch_size, self.patch_size))
-                if mask_patch is not None:
-                    mask_patch = cv2.resize(mask_patch, (self.patch_size, self.patch_size))
-        else:
-            patch = np.zeros((self.patch_size, self.patch_size, image.shape[-1]))
-            mask_patch = np.zeros((self.patch_size, self.patch_size))
-        return patch, mask_patch
-
-    def _print_class_distribution(self):
-        class_counts = {}
-        for label in self.label_post:
-            class_counts[label] = class_counts.get(label, 0) + 1
-
-        if 'test' not in self.split:
-            class_names = ['no-damage', 'minor-damage', 'major-damage', 'destroyed']
-            total_count = []
-            for i, name in enumerate(class_names):
-                count = class_counts.get(i, 0)
-                total_count.append(count)
-                print(f'{name}: {count}')
-        print('Número total de parches de edificios encontrados: '+str(len(self.label_post)))
-
     def __len__(self):
-        return len(self.patch_post)
+        return len(self.image_files)
 
     def __getitem__(self, idx):
-        # Images (pre-, post-) and mask (pre-)
-        # print(self.patch_image_pre[idx])
-        image_pre, image_post = self._process_image(idx)
-        image_pre = image_pre / 255.0
-        image_post = image_post / 255.0
+        img_rel_path = self.image_files[idx]
+        img_path = os.path.join(self.data_dir, img_rel_path)
 
-        mask = self._create_mask(self.label_post_path[idx])
+        # La etiqueta la extraemos del nombre del archivo ({index}_{label}.png)
+        label_str = os.path.splitext(img_rel_path)[0].split('_')[-1]
+        label = int(label_str)
 
-        patch_pre, _ = self._extract_patch(image_pre, mask, self.patch_post[idx])
-        patch_post, mask_patch = self._extract_patch(image_post, mask, self.patch_post[idx])
+        # Usamos PIL para abrir rápido la imagen pre-cortada
+        image_post = Image.open(img_path).convert("RGB")
 
-        label_pre = self.label_pre[idx]
-        label_post = self.label_post[idx]
+        # Devolverla como array de float [0, 1] para no romper las transformaciones previas
+        image_post_np = np.array(image_post, dtype=np.float32) / 255.0
 
-        sample = {'patch_pre': patch_pre,
-                  'patch_post': patch_post,
-                  'mask_patch': mask_patch,
-                  'label_pre': label_pre,
-                  'label_post': label_post,
-                  'idx': idx}
+        # Reconstruimos el mismo diccionario para no romper nada en el resto del notebook
+        sample = {
+            'patch_post': image_post_np,
+            'label_post': label,
+            'patch_pre': np.zeros_like(image_post_np), # Dummy para compatibilidad
+            'mask_patch': np.zeros((64, 64)),          # Dummy para compatibilidad
+            'label_pre': 0,
+            'idx': idx
+        }
+
         if self.transform:
             sample = self.transform(sample)
+
         return sample
-
-
-# In[4]:
-
-
-patch_size = 64
-train_dataset = xBDDataset('xBD_UC3M', ['train'], patch_size=patch_size)
-
-
-# In[5]:
-
-
-val_dataset = xBDDataset('xBD_UC3M', ['val'], patch_size=patch_size)
-
-
-# In[6]:
-
-
-# Elegimos un índice aleatorio
-idx = np.random.randint(0, len(train_dataset))
-
-# Obtenemos las imágenes completas originales usando la función interna
-image_pre_full, image_post_full = train_dataset._process_image(idx)
-event = train_dataset.label_post_path[idx].split('/')[-1][:-5]
-
-fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-fig.suptitle(f"Imágenes completas (1024x1024) - Índice: {idx} - Evento: {event}", fontsize=16)
-
-axes[0].imshow(image_pre_full)
-axes[0].set_title("Antes del desastre (Pre)")
-axes[0].axis('off')
-
-axes[1].imshow(image_post_full)
-axes[1].set_title("Después del desastre (Post)")
-axes[1].axis('off')
-
-plt.tight_layout()
-plt.show()
-
-
-# In[7]:
-
-
-# Elegimos un índice aleatorio
-idx = np.random.randint(0, len(train_dataset))
-
-# Obtenemos un ejemplo procesado directamente desde el método __getitem__
-sample = train_dataset[idx]
-
-patch_pre = sample['patch_pre']
-patch_post = sample['patch_post']
-mask_patch = sample['mask_patch']
-label_post = sample['label_post']
-
-# Mapeo inverso de las clases de daño para la visualización
-inverse_damage_classes = {v: k for k, v in train_dataset.damage_classes.items()}
-damage_text = inverse_damage_classes[label_post]
-
-fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-fig.suptitle(f"Parche de Edificio (64x64) - Etiqueta Post-Desastre: {damage_text} ({label_post})", fontsize=16)
-
-# Aseguramos que los valores estén en el rango correcto para matplotlib (0-255 o 0-1)
-axes[0].imshow(patch_pre)
-axes[0].set_title("Parche Pre-desastre")
-axes[0].axis('off')
-
-axes[1].imshow(patch_post)
-axes[1].set_title("Parche Post-desastre")
-axes[1].axis('off')
-
-axes[2].imshow(mask_patch, cmap='gray')
-axes[2].set_title("Máscara del Edificio")
-axes[2].axis('off')
-
-plt.tight_layout()
-plt.show()
-
-
-# In[8]:
-
-
+# %% [markdown]
+# Extraer parches de 64 x 64
+# %%
+# patch_size = 64
+# train_dataset = CroppedxBDDataset('xBD_cropped', ['train'], patch_size=patch_size)
+# %%
+# val_dataset = CroppedxBDDataset('xBD_cropped', ['val'], patch_size=patch_size)
+# %%
+# # Elegimos un índice aleatorio
+# idx = np.random.randint(0, len(train_dataset))
+#
+# # Obtenemos las imágenes completas originales usando la función interna
+# image_pre_full, image_post_full = train_dataset._process_image(idx)
+# event = train_dataset.label_post_path[idx].split('/')[-1][:-5]
+#
+# fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+# fig.suptitle(f"Imágenes completas (1024x1024) - Índice: {idx} - Evento: {event}", fontsize=16)
+#
+# axes[0].imshow(image_pre_full)
+# axes[0].set_title("Antes del desastre (Pre)")
+# axes[0].axis('off')
+#
+# axes[1].imshow(image_post_full)
+# axes[1].set_title("Después del desastre (Post)")
+# axes[1].axis('off')
+#
+# plt.tight_layout()
+# plt.show()
+# %%
+# # Elegimos un índice aleatorio
+# idx = np.random.randint(0, len(train_dataset))
+#
+# # Obtenemos un ejemplo procesado directamente desde el método __getitem__
+# sample = train_dataset[idx]
+#
+# patch_pre = sample['patch_pre']
+# patch_post = sample['patch_post']
+# mask_patch = sample['mask_patch']
+# label_post = sample['label_post']
+#
+# # Mapeo inverso de las clases de daño para la visualización
+# inverse_damage_classes = {v: k for k, v in train_dataset.damage_classes.items()}
+# damage_text = inverse_damage_classes[label_post]
+#
+# fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+# fig.suptitle(f"Parche de Edificio (64x64) - Etiqueta Post-Desastre: {damage_text} ({label_post})", fontsize=16)
+#
+# # Aseguramos que los valores estén en el rango correcto para matplotlib (0-255 o 0-1)
+# axes[0].imshow(patch_pre)
+# axes[0].set_title("Parche Pre-desastre")
+# axes[0].axis('off')
+#
+# axes[1].imshow(patch_post)
+# axes[1].set_title("Parche Post-desastre")
+# axes[1].axis('off')
+#
+# axes[2].imshow(mask_patch, cmap='gray')
+# axes[2].set_title("Máscara del Edificio")
+# axes[2].axis('off')
+#
+# plt.tight_layout()
+# plt.show()
+# %%
 class RandomCrop(object):
     """Recortamos aleatoriamente la imagen.
 
@@ -534,14 +371,10 @@ class Normalize(object):
                   'label_post': sample['label_post'],
                   'idx': sample['idx']}
         return sample
-
-
-# In[9]:
-
-
+# %%
 class AugmentPostPatch(object):
     """
-    Extrae 'patch_post' del diccionario, le aplica transformaciones de torchvision 
+    Extrae 'patch_post' del diccionario, le aplica transformaciones de torchvision
     y lo devuelve al diccionario.
     """
     def __init__(self, transform_pipeline):
@@ -549,25 +382,20 @@ class AugmentPostPatch(object):
 
     def __call__(self, sample):
         image = sample['patch_post']
-        
+
         # 1. Convertimos la matriz numpy a imagen PIL (formato de 8 bits: 0-255)
         pil_image = Image.fromarray(util.img_as_ubyte(image))
-        
+
         # 2. Aplicamos el pipeline de transformaciones (ej. flips, rotaciones)
         transformed_image = self.transform_pipeline(pil_image)
-        
+
         # 3. Volvemos a convertir a matriz numpy flotante (0.0 a 1.0)
         image_np = util.img_as_float(np.asarray(transformed_image))
-        
+
         # 4. Actualizamos el diccionario y lo devolvemos
         sample['patch_post'] = image_np
         return sample
-
-
-# In[10]:
-
-
-# Definimos las transformaciones visuales. 
+# %%
 vision_transforms = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5), # Voltea la imagen horizontalmente (50% de prob)
     transforms.RandomVerticalFlip(p=0.5),   # Voltea la imagen verticalmente (50% de prob)
@@ -590,42 +418,30 @@ eval_transforms = transforms.Compose([
 
 
 # Datos de train
-train_dataset = xBDDataset('xBD_UC3M', ['train'], patch_size=64,
-                           max_size=500, # set this to 0 when training
-                           transform=train_transforms)
+train_dataset = CroppedxBDDataset('xBD_cropped', ['train'],
+                                  max_size=0,
+                                  transform=train_transforms)
 
 # Datos de validación
-val_dataset = xBDDataset('xBD_UC3M', ['val'], patch_size=64,
-                         transform=eval_transforms)
+val_dataset = CroppedxBDDataset('xBD_cropped', ['val'],
+                                transform=eval_transforms)
 
 # Datos de test
-test_dataset = xBDDataset('xBD_UC3M', ['test'], patch_size=64,
-                          transform=eval_transforms)
+test_dataset = CroppedxBDDataset('xBD_cropped',['test'],
+                                 transform=eval_transforms)
+# %%
+train_dataloader = DataLoader(train_dataset, batch_size=128,
+                        shuffle=True, num_workers=4,
+                        pin_memory=True, persistent_workers=True)
 
+val_dataloader = DataLoader(val_dataset, batch_size=256,
+                        shuffle=False, num_workers=4,
+                        pin_memory=True, persistent_workers=True)
 
-# In[11]:
-
-
-#Especificamos el dataset de train, un tamaño de batch de 64, desordenamos las imágenes,
-# y paralelizamos con 3 workers
-train_dataloader = DataLoader(train_dataset, batch_size=64,
-                        shuffle=True, num_workers=3)
-
-#Dataset de validación => No desordenamos
-#Como no hay que hacer backward, podemos aumentar mucho el batch_size
-val_dataloader = DataLoader(val_dataset, batch_size=128,
-                        shuffle=False, num_workers=3)
-
-#Dataset de test => No desordenamos
-test_dataloader = DataLoader(test_dataset, batch_size=128,
-                        shuffle=False, num_workers=3)
-
-
-
-
-# In[12]:
-
-
+test_dataloader = DataLoader(test_dataset, batch_size=256,
+                        shuffle=False, num_workers=4,
+                        pin_memory=True, persistent_workers=True)
+# %%
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -709,14 +525,12 @@ class CustomNet(nn.Module):
         x = self.fc2(x)       # Produce the final 4 logits
         
         return x
-
-
-# In[13]:
-
-
+# %%
 customNet = CustomNet() #Invocamos el constructor de la red (método init())
 customNet.to(device) #Pasamos la red al device que estemos usando (gpu)
 #Obtenemos un batch de datos y extraemos imágenes y etiquetas
+customNet = torch.compile(customNet)
+
 data=next(iter(train_dataloader))
 inputs = data['patch_post'].to(device).float()
 labels = data['label_post'].to(device)
@@ -728,30 +542,39 @@ print('El tamaño del tensor que representa un batch de imágenes es {}'.format(
 with torch.set_grad_enabled(False):
     outputs = customNet(inputs)
     print('El tamaño del tensor de salida es {}'.format(outputs.shape))
+# %%
+counts =[50928, 4659, 2357, 3227]
+total = sum(counts)
+num_classes = 4
 
+# 2. Calculamos los pesos balanceados (fórmula clásica: total / (num_clases * count))
+# Esto dará menos peso a la clase mayoritaria (0.3) y mucho a las minoritarias (hasta 6.4)
+weights =[total / (num_classes * c) for c in counts]
+print(f"Pesos asignados a las clases[0, 1, 2, 3]: {weights}")
 
-# In[14]:
+# Convertimos a tensor de PyTorch y lo mandamos a la GPU
+class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
 
-
-criterion = nn.CrossEntropyLoss()
+# 3. Le pasamos los pesos a la función de pérdida
+criterion = nn.CrossEntropyLoss(weight=class_weights)
 
 # Usaremos SGD con momento para optimizar
-optimizer_ft = optim.SGD(customNet.parameters(), lr=1e-2, momentum=0.9)
+optimizer_ft = optim.AdamW(customNet.parameters(), lr=1e-4, weight_decay=1e-2)
 
 # Un factor lr que  decae 0.1 cada 7 épocas
-exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
-
-
-# In[15]:
-
+exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=5, gamma=0.5)
+# %%
+from tqdm import tqdm # Asegúrate de tenerlo importado
 
 def train_model(model, criterion, optimizer, scheduler, num_epochs=25, plot_confusion_matrix=True):
 
-    #Fijamos semillas para maximizar reproducibilidad
+    # Fijamos semillas para maximizar reproducibilidad
     random.seed(42)
     npr.seed(42)
     torch.manual_seed(42)
-    torch.backends.cudnn.benchmark = False
+
+    # 1. OPTIMIZACIÓN: cuDNN Benchmark en True (Acelera CNNs en GPUs NVIDIA)
+    torch.backends.cudnn.benchmark = True
 
     since = time.time()
 
@@ -760,70 +583,89 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25, plot_conf
     best_model_wts = copy.deepcopy(model.state_dict())
     best_f1 = 0
     best_outputs = []
-    best_labels = []
-    #Bucle de épocas de entrenamiento
+    best_labels =[]
+
+    # 2. OPTIMIZACIÓN: Inicializamos el GradScaler para Mixed Precision (AMP)
+    scaler = torch.amp.GradScaler('cuda')
+
+    # Bucle de épocas de entrenamiento
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
 
         # Cada época tiene entrenamiento y validación
-        for phase in ['train', 'val']:
+        for phase in['train', 'val']:
             if phase == 'train':
                 model.train()  # Ponemos el modelo en modo entrenamiento
             else:
                 model.eval()   # Ponemos el modelo en modo evaluación
 
-
-            #Tamaño del dataset
+            # Tamaño del dataset
             numSamples = dataset_sizes[phase]
 
             # Creamos las variables que almacenarán las salidas y las etiquetas
-            outputs_m=np.zeros((numSamples,numClasses),dtype=np.float32)
-            labels_m=np.zeros((numSamples,),dtype=int)
+            outputs_m = np.zeros((numSamples, numClasses), dtype=np.float32)
+            labels_m = np.zeros((numSamples,), dtype=int)
             running_loss = 0.0
 
-            contSamples=0
+            contSamples = 0
 
-            # Iteramos sobre los datos.
-            for sample in dataloaders[phase]:
+            # ------------------------------------------------------------------
+            # NUEVO: Integramos tqdm para la barra de progreso
+            # leave=False hace que la barra desaparezca al llegar al 100%
+            # para no saturar la pantalla (dejando solo los prints limpios)
+            # ------------------------------------------------------------------
+            progress_bar = tqdm(dataloaders[phase], desc=f"{phase.capitalize()} Epoch {epoch}/{num_epochs-1}", leave=False)
+
+            # Iteramos sobre los datos usando progress_bar en lugar de dataloaders[phase]
+            for sample in progress_bar:
                 inputs = sample['patch_post'].to(device)
                 labels = sample['label_post'].to(device)
 
-                #Tamaño del batch
+                # Tamaño del batch
                 batchSize = labels.shape[0]
 
-                # Ponemos a cero los gradientes
-                optimizer.zero_grad()
+                # 3. OPTIMIZACIÓN: set_to_none=True es más rápido y consume menos VRAM
+                optimizer.zero_grad(set_to_none=True)
 
                 # Paso forward
                 # registramos operaciones solo en train
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs)
-                    loss = criterion(outputs, labels)
 
-                    # backward y optimización solo en training
+                    # 4. OPTIMIZACIÓN: Autocast para Mixed Precision
+                    with torch.amp.autocast('cuda'):
+                        outputs = model(inputs)
+                        loss = criterion(outputs, labels)
+
+                    # backward y optimización solo en training usando el Scaler
                     if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
 
                 # Sacamos estadísticas y actualizamos variables
                 running_loss += loss.item() * inputs.size(0)
 
-                #Aplicamos un softmax a la salida
-                outputs=F.softmax(outputs.data,dim=1)
-                outputs_m [contSamples:contSamples+batchSize,...]=outputs.cpu().numpy()
-                labels_m [contSamples:contSamples+batchSize]=labels.cpu().numpy()
-                contSamples+=batchSize
+                # Aplicamos un softmax a la salida
+                # IMPORTANTE: Pasamos a float() porque con AMP la salida estará en float16
+                outputs_probs = F.softmax(outputs.detach(), dim=1).float()
 
-            #Actualizamos la estrategia de lr
+                outputs_m[contSamples:contSamples+batchSize, ...] = outputs_probs.cpu().numpy()
+                labels_m[contSamples:contSamples+batchSize] = labels.cpu().numpy()
+                contSamples += batchSize
+
+                # NUEVO: Actualizamos el texto a la derecha de la barra con la Loss actual
+                progress_bar.set_postfix(loss=f"{loss.item():.4f}")
+
+            # Actualizamos la estrategia de lr
             if phase == 'train':
                 scheduler.step()
 
-            #Loss acumulada en la época
+            # Loss acumulada en la época
             epoch_loss = running_loss / dataset_sizes[phase]
 
-            #Calculamos Macro F1-score
-            epoch_f1=f1_score(labels_m,np.argmax(outputs_m,axis=1),average='macro')
+            # Calculamos Macro F1-score
+            epoch_f1 = f1_score(labels_m, np.argmax(outputs_m, axis=1), average='macro')
 
             print('{} Loss: {:.4f} Macro F1-score: {:.4f}'.format(
                 phase, epoch_loss, epoch_f1))
@@ -832,7 +674,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25, plot_conf
             if phase == 'val' and epoch_f1 > best_f1:
                 best_f1 = epoch_f1
                 best_model_wts = copy.deepcopy(model.state_dict())
-                best_outputs = np.argmax(outputs_m,axis=1)
+                best_outputs = np.argmax(outputs_m, axis=1)
                 best_labels = labels_m
 
         print()
@@ -844,10 +686,9 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25, plot_conf
 
     if plot_confusion_matrix:
         # Visualizamos la matriz de confusión
-        cm=confusion_matrix(best_labels, best_outputs, normalize='true')
-        #print(cm)
-        #Vamos a mostrar en porcentajes en vez de probs
-        ncmd=ConfusionMatrixDisplay(100*cm,display_labels=list(image_datasets['val'].damage_classes.keys()))
+        cm = confusion_matrix(best_labels, best_outputs, normalize='true')
+        # Vamos a mostrar en porcentajes en vez de probs
+        ncmd = ConfusionMatrixDisplay(100*cm, display_labels=list(image_datasets['val'].damage_classes.keys()))
         ncmd.plot(xticks_rotation='vertical')
         plt.title('Normalized confusion matrix (%)')
         plt.show()
@@ -855,35 +696,17 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25, plot_conf
     # load best model weights
     model.load_state_dict(best_model_wts)
     return model
-
-
-# In[16]:
-
-
+# %%
 image_datasets = {'train' : train_dataset, 'val': val_dataset, 'test': test_dataset}
 
 dataloaders = {'train' : train_dataloader, 'val': val_dataloader, 'test': test_dataloader}
 
 dataset_sizes = {'train': len(train_dataset), 'val': len(val_dataset), 'test': len(test_dataset)}
 class_names = list(image_datasets['train'].damage_classes.keys())
-
-
-# In[19]:
-
-
+# %%
 from sklearn.metrics import f1_score
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-
-
-# In[ ]:
-
-
+# %%
 customNet = train_model(customNet, criterion, optimizer_ft, exp_lr_scheduler,
                        num_epochs=20)
-
-
-# In[ ]:
-
-
-
-
+# %%
