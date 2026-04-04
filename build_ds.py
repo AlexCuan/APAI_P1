@@ -48,16 +48,13 @@ class CroppedxBDDataset(Dataset):
         self.transform = transform
 
         self.image_files = []
-        # Leemos los paths de los parches creados
         for s in split:
             split_dir = os.path.join(data_dir, s)
-            # natsorted asegura que 000000, 000001 mantienen el orden estricto para el Test
             files = natsorted([f for f in os.listdir(split_dir) if f.endswith(".png")])
             if "test" not in split:
                 files = [f for f in files if not f.endswith("_-1.png")]
             self.image_files.extend([os.path.join(s, f) for f in files])
 
-        # Misma lógica de pseudo-barajado que tenías por si usas max_size
         if max_size > 0:
             idx = np.random.RandomState(seed=42).permutation(
                 range(len(self.image_files))
@@ -78,17 +75,13 @@ class CroppedxBDDataset(Dataset):
         img_rel_path = self.image_files[idx]
         img_path = os.path.join(self.data_dir, img_rel_path)
 
-        # La etiqueta la extraemos del nombre del archivo ({index}_{label}.png)
         label_str = os.path.splitext(img_rel_path)[0].split("_")[-1]
         label = int(label_str)
 
-        # Usamos PIL para abrir rápido la imagen pre-cortada
         image_post = Image.open(img_path).convert("RGB")
 
-        # Devolverla como array de float [0, 1] para no romper las transformaciones previas
         image_post_np = np.array(image_post, dtype=np.float32) / 255.0
 
-        # Reconstruimos el mismo diccionario para no romper nada en el resto del notebook
         sample = {
             "patch_post": image_post_np,
             "label_post": label,
@@ -104,9 +97,6 @@ class CroppedxBDDataset(Dataset):
         return sample
 
 
-# ---------------------------------------------------------
-# 1. IMPROVED TRANSFORMS (Operating directly on Tensors)
-# ---------------------------------------------------------
 class DictTransformWrapper:
     """
     Wraps standard torchvision transforms to work with our custom dictionary dataset.
@@ -119,10 +109,8 @@ class DictTransformWrapper:
     def __call__(self, sample):
         image = sample["patch_post"]
 
-        # Convert numpy (H x W x C) to tensor (C x H x W) in float32 [0.0, 1.0]
         image = torch.from_numpy(image.transpose((2, 0, 1))).float()
 
-        # Apply torchvision transforms directly on the tensor
         image = self.pipeline(image)
 
         sample["patch_post"] = image
@@ -130,15 +118,12 @@ class DictTransformWrapper:
         return sample
 
 
-# Pure Tensor transformations (Much faster, preserves float32 precision)
 vision_transforms_train = transforms.Compose(
     [
         transforms.RandomCrop(64, padding=4, padding_mode="reflect"),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.5),
-        transforms.RandomRotation(
-            degrees=90
-        ),  # 90 degrees prevents black cut-off borders on square patches
+        transforms.RandomRotation(degrees=90),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
@@ -151,7 +136,6 @@ vision_transforms_eval = transforms.Compose(
 train_transforms = DictTransformWrapper(vision_transforms_train)
 eval_transforms = DictTransformWrapper(vision_transforms_eval)
 
-# Dataset & Dataloaders
 train_dataset = CroppedxBDDataset(
     "xBD_cropped", ["train"], max_size=0, transform=train_transforms
 )
@@ -196,9 +180,6 @@ dataset_sizes = {
 image_datasets = {"train": train_dataset, "val": val_dataset, "test": test_dataset}
 
 
-# ---------------------------------------------------------
-# 2. IMPROVED ARCHITECTURE (GAP + Higher Channel Capacity)
-# ---------------------------------------------------------
 class CustomNetImproved(nn.Module):
     def __init__(self):
         super(CustomNetImproved, self).__init__()
@@ -255,40 +236,30 @@ class CustomNetImproved(nn.Module):
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 customNet = CustomNetImproved().to(device)
 
-# ---------------------------------------------------------
-# 3. SMOOTHED WEIGHTS & SCHEDULER SETUP
-# ---------------------------------------------------------
 counts = [50928, 4659, 2357, 3227]
 total = sum(counts)
 num_classes = 4
 
-# Square Root Smoothing to prevent catastrophic over-penalization of minority classes
 weights = [math.sqrt(total / (num_classes * c)) for c in counts]
 print(f"Smoothed Class Weights[0, 1, 2, 3]: {weights}")
 
 class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
 criterion = nn.CrossEntropyLoss()
 
-# Slightly higher LR since we are using AdamW and starting from scratch
 
 optimizer_ft = optim.SGD(
     customNet.parameters(), lr=1e-2, momentum=0.9, weight_decay=1e-4
 )
 
-# ReduceLROnPlateau monitors Validation F1 and reduces LR dynamically
 
 exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=10, gamma=0.1)
 
 
-# ---------------------------------------------------------
-# 4. UPDATED TRAINING LOOP
-# ---------------------------------------------------------
 def train_model(
     model, criterion, optimizer, scheduler, num_epochs=25, plot_confusion_matrix=True
 ):
     writer = SummaryWriter()
 
-    # Reproducibility
     import random
 
     random.seed(42)
@@ -310,7 +281,6 @@ def train_model(
         print(f"Epoch {epoch}/{num_epochs - 1}")
         print("-" * 10)
 
-        # Print the current Learning Rate so you can see it drop!
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"Current Learning Rate: {current_lr:.6f}")
 
@@ -351,7 +321,6 @@ def train_model(
 
                 running_loss += loss.item() * inputs.size(0)
 
-                # Store probabilities and labels
                 outputs_probs = F.softmax(outputs.detach(), dim=1).float()
                 outputs_m[contSamples : contSamples + batchSize, ...] = (
                     outputs_probs.cpu().numpy()
@@ -371,8 +340,6 @@ def train_model(
                 f"{phase.capitalize()} Loss: {epoch_loss:.4f} Macro F1-score: {epoch_f1:.4f}"
             )
 
-            # Note: We NO LONGER step the scheduler here.
-            # We only evaluate if it's the best model.
             if phase == "val":
                 if epoch_f1 > best_f1:
                     best_f1 = epoch_f1
@@ -381,7 +348,6 @@ def train_model(
                     best_labels = labels_m
                     torch.save(best_model_wts, "best_custom_net.pth")
 
-        # STEP THE SCHEDULER HERE: Exactly once per epoch, outside the phase loop.
         scheduler.step()
         print()
 
@@ -389,7 +355,6 @@ def train_model(
     print(f"Training complete in {time_elapsed // 60:.0f}m {time_elapsed % 60:.0f}s")
     print(f"Best val Macro F1-score: {best_f1:.4f}")
 
-    # Print the detailed Classification Report for the Best Epoch
     print("\nClassification Report (Best Epoch):")
     target_names = list(image_datasets["val"].damage_classes.keys())
     print(classification_report(best_labels, best_outputs, target_names=target_names))
@@ -398,16 +363,13 @@ def train_model(
         cm = confusion_matrix(best_labels, best_outputs, normalize="true")
         ncmd = ConfusionMatrixDisplay(100 * cm, display_labels=target_names)
 
-        # Create a figure explicitly
         fig, ax = plt.subplots(figsize=(8, 6))
         ncmd.plot(xticks_rotation="vertical", cmap="Blues", ax=ax)
         plt.title("Normalized Confusion Matrix (%) - Best Epoch")
 
-        # SAVE the file instead of (or before) showing it
         plt.savefig("best_confusion_matrix.png", bbox_inches="tight")
         print("Confusion matrix saved to 'best_confusion_matrix.png'")
 
-        # You can comment this out if you don't want the popup at all
         # plt.show()
 
     model.load_state_dict(best_model_wts)
@@ -415,14 +377,11 @@ def train_model(
     return model
 
 
-# ---------------------------------------------------------
-# 5. EXECUTE TRAINING
-# ---------------------------------------------------------
 if __name__ == "__main__":
     customNet = train_model(
         customNet,
         criterion,
         optimizer_ft,
         exp_lr_scheduler,
-        num_epochs=25,  # Recomended to let it run longer since you now have ReduceLROnPlateau
+        num_epochs=25,
     )
