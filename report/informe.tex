@@ -68,17 +68,19 @@ Para este proyecto se ha utilizado el dataset \textit{xBD}, compuesto por imáge
 
 \section{Metodología}
 
-Debido a las limitaciones de Google Colab y las máquinas virtuales proveídas por la universidad, las pruebas se desarrollaron en un entorno local con recursos limitados, pero suficientes. Sin embargo, tanto en desarrollo local como en remoto, el \textit{notebook} presentaba una gran limitación. La lectura en tiempo real y recorte de polígonos sobre imágenes TIFF de gran formato ($1024\times1024$) generaba un severo cuello de botella de \textit{I/O}.
+Debido a las limitaciones de Google Colab y las máquinas virtuales proveídas por la universidad, las pruebas se desarrollaron casi en su totalidad en entornos locales con recursos limitados, pero suficientes. Sin embargo, tanto en desarrollo local como en remoto, el \textit{notebook} presentaba una gran limitación. La lectura en tiempo real y recorte de polígonos sobre imágenes TIFF de gran formato ($1024\times1024$) generaba un severo cuello de botella de \textit{I/O}.
 
-Para solucionarlo, se implementó un script de \textit{pre-cropping} que almacenó las infraestructuras en archivos \texttt{.png} individuales de $64\times64$. Adicionalmente, se desarrolló un \texttt{DictTransformWrapper} para aplicar \textit{data augmentation} directamente sobre tensores de PyTorch en lugar de PIL y se habilitó \textit{automatic mixed precision} (AMP), lo cual aceleró el entrenamiento significativamente.
+Una vez detectado el problema, se implementaron varias alternativas para acelerar el proceso de entrenamiento. 
 
-Se pasó de un entrenamiento de aproximadamente 5 minutos por \textit{epoch} a solamente 40 segundos, lo cual permitió iterar de manera más rápida sobre diferentes ideas. Después de idear varias alternativas y lograr pequeñas variaciones de rendimiento con cada iteración, se decidió hacer algo parecido a un \textit{Grid Search} donde se probasen diferentes parámetros y todas sus variaciones.
+\begin{itemize}
+  \item Primero, se desarrolló un sistema de caché de imágenes, precálculo de máscaras y almacenamiento de parches en archivos \texttt{.npy}. 
+  \item También se implementó un script de \textit{pre-cropping} que almacenó las infraestructuras en archivos \texttt{.png} individuales de $64\times64$. Adicionalmente, se desarrolló un \texttt{DictTransformWrapper} para aplicar \textit{data augmentation} directamente sobre tensores de PyTorch en lugar de PIL y se habilitó \textit{automatic mixed precision} (AMP). \end{itemize}
 
-Se varió la arquitectura, los tipos de \textit{data augmentation}, los pesos, la función de pérdida, el optimizador y el \textit{scheduler}; todo para un total de 64 entrenamientos. El tiempo de entrenamiento fue de 10 horas aproximadamente, para 20 \textit{epochs} por entrenamiento y un \textit{batch size} de 128.
+Se pasó de un entrenamiento de aproximadamente 5 minutos por \textit{epoch} a solamente 40 segundos, lo cual permitió iterar de manera más rápida sobre diferentes ideas. 
 
 \subsection{Data Augmentation y Balanceo de Clases}
 
-De las proposiciones de \textit{data augmentation}, la más simple resultó ser la más efectiva. Se volteó la imagen tanto horizontalmente como verticalmente con una probabilidad del 50\%. También se aplicó transformaciones de brillo, contraste, saturación y matiz para evitar el sobreajuste del modelo. \\ 
+De las proposiciones de \textit{data augmentation}, la más simple resultó ser la más efectiva. Se volteó la imagen tanto horizontalmente como verticalmente con una probabilidad del 50\%. También se aplicó transformaciones de brillo, contraste, saturación y matiz para evitar el sobreajuste del modelo. 
 
 El dataset está infinitamente desbalanceado, por lo que entrenar un modelo usando solamente las imágenes post-desastre y que generalizara de manera decente ha sido una tarea difícil. Se intentó aplicar pesos inversos lineales, pero resultó en una gran inestabilidad; sin embargo, el suavizado por raíz cuadrada resultó dar mejores resultados.
 
@@ -86,11 +88,26 @@ Adicionalmente a los entrenamientos con estos parámetros, se intentó aplicar u
 
 \subsection{Red Custom}
 
-Se diseñó una red convolucional inspirada en VGG compuesta por 3 bloques. Los canales aumentan progresivamente ($3 \rightarrow 32 \rightarrow 64 \rightarrow 128$). Cada bloque incluye dos capas \texttt{Conv2d}, \texttt{BatchNorm2d}, \texttt{ReLU} y un \texttt{MaxPool2d}.
+El equipo decidió probar en paralelo varias arquitecturas y compararlas a modo de competicion para lograr avances mas rapidos y certeros. En cada reunion se revisaron las decisiones tomadas por los demas y se mejoraron los modelos ya existentes.
 
-Una decisión arquitectónica importante fue sustituir la clásica \texttt{Flatten} por una capa de \texttt{GlobalAveragePooling} (GAP). Esto redujo masivamente el cuello de botella paramétrico del clasificador final, previniendo un sobreajuste masivo y acelerando el entrenamiento grandemente.
 
-El entrenamiento arrojó como resultado que la combinación del optimizador \texttt{AdamW}, la función de pérdida \texttt{CrossEntropyLoss} con un \textit{label smoothing} de 0.1 y \texttt{CosineAnnealingLR} como \textit{scheduler}, aunque con márgenes muy acotados, logró los mejores resultados.
+\subsubsection{ABRMS-Net}
+Una de las arquitecturas esta inspirada en ABRMS-Net y esta compuesta por tres bloques diferencidos:
+
+\begin{itemize}
+  \item Primer bloque: Compuesto por tres capas con kernel $3\times3$ y funcion de activacion GELU
+  \item Segundo bloque: Está dividido en dos secciones iguales, implementa un mecanismo de atención espacial y un bloque convolucional multi-escala. Estas dos secciones tienen conexiones residuales para tratar de solventar la degradación del gradiente.
+  \item Tercer bloque: Capas totalmente conectadas.
+\end{itemize}
+Se empleó el optimizador \texttt{AdamW} y la funcion de perdidida \texttt{CrossEntropyLoss} con pesos predefinidos para mitigar el desbalance de clases.
+\subsubsection{VGG}
+Se diseñó una red convolucional inspirada en VGG compuesta por 3 bloques. Los canales aumentan progresivamente ($3 \rightarrow 32 \rightarrow 64 \rightarrow 128$). Cada bloque incluye dos capas \texttt{Conv2d}, \texttt{BatchNorm2d}, \texttt{ReLU} y un \texttt{MaxPool2d}. Una decisión arquitectónica importante fue sustituir la clásica \texttt{Flatten} por una capa de \texttt{GlobalAveragePooling} (GAP). Esto redujo masivamente el cuello de botella paramétrico del clasificador final, previniendo un sobreajuste masivo y acelerando el entrenamiento grandemente.
+
+Después de idear varias alternativas y lograr pequeñas variaciones de rendimiento con cada iteración, se decidió hacer algo parecido a un \textit{Grid Search} donde se probasen diferentes parámetros y todas sus variaciones. Se varió la misma arquitectura, los tipos de \textit{data augmentation}, los pesos, la función de pérdida, el optimizador y el \textit{scheduler}; todo para un total de 64 entrenamientos. El tiempo de entrenamiento fue de 10 horas aproximadamente, para 20 \textit{epochs} por entrenamiento y un \textit{batch size} de 128.
+
+
+\subsubsection{Conclusiones}
+El entrenamiento arrojó como resultado que la combinación del modelo VGG, optimizador \texttt{AdamW}, la función de pérdida \texttt{CrossEntropyLoss} con un \textit{label smoothing} de 0.1 y \texttt{CosineAnnealingLR} como \textit{scheduler} logró los mejores resultados.
 
 \subsection{Redes Pre-entrenadas y Fine-Tuning}
 
