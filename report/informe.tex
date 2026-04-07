@@ -100,6 +100,7 @@ Una de las arquitecturas esta inspirada en ABRMS-Net y esta compuesta por tres b
   \item Tercer bloque: Capas totalmente conectadas.
 \end{itemize}
 Se empleó el optimizador \texttt{AdamW} y la funcion de perdidida \texttt{CrossEntropyLoss} con pesos predefinidos para mitigar el desbalance de clases.
+
 \subsubsection{VGG}
 Se diseñó una red convolucional inspirada en VGG compuesta por 3 bloques. Los canales aumentan progresivamente ($3 \rightarrow 32 \rightarrow 64 \rightarrow 128$). Cada bloque incluye dos capas \texttt{Conv2d}, \texttt{BatchNorm2d}, \texttt{ReLU} y un \texttt{MaxPool2d}. Una decisión arquitectónica importante fue sustituir la clásica \texttt{Flatten} por una capa de \texttt{GlobalAveragePooling} (GAP). Esto redujo masivamente el cuello de botella paramétrico del clasificador final, previniendo un sobreajuste masivo y acelerando el entrenamiento grandemente.
 
@@ -111,10 +112,23 @@ El entrenamiento arrojó como resultado que la combinación del modelo VGG, opti
 
 \subsection{Redes Pre-entrenadas y Fine-Tuning}
 
+\subsubsection{AlexNet}
+Como punto de partida se utilizó el modelo AlexNet preentrenado en ImageNet, adaptando su última capa para producir 4 scores correspondientes a las clases del problema. Sobre esta base se aplicaron las siguientes modificaciones:
+\begin{itemize}
+  \item Redimensionado a $224 \times 224$: las imágenes originales son de $64\times64$ pero AlexNet fue diseñada para entradas de $224\times224$. Sin este redimensionado los feature maps internos se reducen demasiado rápido y la red no puede aprovechar los pesos preentrenados.
+  \item Congelamiento de las capas convolucionales de AlexNet : AlexNet tiene solo 5 capas conv que aprenden características generales. Congelar todos sus parámetros con \texttt{requires\_grad=False} preserva el conocimiento adquirido en ImageNet y reduce el riesgo de overfitting, dejando libre únicamente el clasificador final con las 4 clases del problema.
+\end{itemize}
+
+    Adicionalmente se uso ResNet50, una arquitectura más profunda con 50 capas y conexiones residuales, capaz de aprender representaciones más ricas. Se congelaron únicamente los tres primeros bloques residuales (\texttt{layer1, layer2, layer3}), que aprenden características universales como bordes y texturas, dejando libre layer4 que a ese nivel de profundidad puede adaptarse mejor al dominio específico de las imágenes satelitales.
+
+\subsubsection{VGG}
+
 Se comenzó evaluando \texttt{ResNet18}. Sin embargo, su desempeño fue deficiente en comparación con el modelo \textit{custom}. En consecuencia, la elección final fue \texttt{VGG11\_bn}.
 
 Se entrenó durante 15 \textit{epochs}. Para evitar destruir los filtros pre-entrenados, se implementó Descongelado Gradual: los dos primeros \textit{epochs} entrenaron exclusivamente el nuevo clasificador. A partir del \textit{epoch} 3, se descongeló toda la red empleando \textit{learning rates} diferenciales ($1e^{-5}$ para el \textit{backbone} y $1e^{-4}$ para la cabeza). En cuanto a los demás parámetros, se usaron los que mejor resultado dieron en el modelo \textit{custom}.
 
+\subsubsection{Conclusiones}
+Ambos modelos alcanzaron una puntuacion similar en la metrica \texttt{F1-Score} en el set de validacion, aunque en Codabench se desepmeñó mejor el modelo VGG.
 \section{Resultados y Análisis de Error}
 
 Para evaluar el rendimiento de los modelos, se registraron las curvas de aprendizaje tanto para la función de pérdida (\textit{Loss}) como para la métrica principal (\textit{Macro F1-score}) durante las \textit{epochs} de entrenamiento de todos los entrenamientos, así como las matrices de confusión. Por simplicidad, se han añadido las de mejor rendimiento (Figuras 1 y 2). 
@@ -177,6 +191,6 @@ Como comentario al respecto, es importante recalcar lo inestable que es la funci
 
 \section{Conclusiones}
 
-El análisis crítico del proyecto revela que el éxito en esta tarea, dadas las condiciones tan peculiares de la base de datos, no recae en la profundidad de la red, sino en el manejo de otros aspectos. La técnica con mayor impacto positivo fue la combinación de un modelo estilo VGG con \texttt{AdamW}, \texttt{CrossEntropyLoss} y \textit{label smoothing}, \texttt{CosineAnnealingLR} y transformaciones básicas. Aunque, durante la etapa de búsqueda, se detectó que el entrenar la red usando técnicas más avanzadas como modelos de atención, o incluso entrenar la red usando imágenes pre y post desastre, aumentarían el desempeño.
+El análisis crítico del proyecto revela que el éxito en esta tarea, dadas las condiciones tan peculiares de la base de datos, no recae en la profundidad de la red, sino en el manejo de otros aspectos. La técnica con mayor impacto positivo fue la combinación de un modelo estilo VGG con \texttt{AdamW}, \texttt{CrossEntropyLoss} y \textit{label smoothing}, \texttt{CosineAnnealingLR} y transformaciones básicas. Es necesario añadir que, durante la etapa de búsqueda, se encontró informacion relacionada con que entrenar la red usando técnicas más avanzadas como modelos de atención, o incluso entrenar la red usando imágenes pre y post desastre, aumentarían el desempeño.
 
 \end{document}
