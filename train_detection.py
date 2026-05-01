@@ -448,7 +448,9 @@ def train_detection():
 def test_and_visualize():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"==========================================")
-    print(f"Iniciando Fase de Test y Visualización")
+    print(
+        f"Iniciando Fase de Test y Visualización Doble (Predicciones vs Ground Truth)"
+    )
     print(f"==========================================")
 
     model = build_vgg_faster_rcnn(None, num_classes=5)
@@ -470,7 +472,8 @@ def test_and_visualize():
         test_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn
     )
 
-    class_names = ["Fondo", "No-Damage", "Minor-Damage", "Major-Damage", "Destroyed"]
+    # Clases abreviadas
+    class_names = ["Fondo", "ND", "MinD", "MajD", "Dest"]
     colors = [(0, 0, 0), (0, 255, 0), (0, 255, 255), (255, 165, 0), (255, 0, 0)]
 
     with torch.no_grad():
@@ -480,77 +483,168 @@ def test_and_visualize():
             with torch.amp.autocast("cuda"):
                 predictions = model([img_tensor])[0]
 
+            # 1. Predicciones
             boxes = predictions["boxes"].cpu().numpy()
             labels = predictions["labels"].cpu().numpy()
             scores = predictions["scores"].cpu().numpy()
 
-            umbral = 0.5
+            # 2. Etiquetas Reales (Ground Truth)
+            gt_boxes = targets[0]["boxes"].cpu().numpy()
+            gt_labels = targets[0]["labels"].cpu().numpy()
 
-            img_cv = img_tensor.cpu().permute(1, 2, 0).numpy().copy()
-            img_cv = (img_cv * 255).astype(np.uint8)
-            img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGB2BGR)
+            umbral = 0.80
+
+            # --- PREPARAMOS DOS COPIAS DE LA IMAGEN ---
+            img_base = img_tensor.cpu().permute(1, 2, 0).numpy().copy()
+            img_base = (img_base * 255).astype(np.uint8)
+            img_base = cv2.cvtColor(img_base, cv2.COLOR_RGB2BGR)
+
+            img_cv_pred = img_base.copy()  # Para pintar lo que dice la red
+            img_cv_gt = img_base.copy()  # Para pintar la realidad
 
             found_objects = 0
+            correct_predictions = 0
+
+            # ==========================================
+            # PANEL 1: DIBUJAR PREDICCIONES
+            # ==========================================
             for i in range(len(boxes)):
                 if scores[i] >= umbral:
                     found_objects += 1
                     box = boxes[i].astype(int)
-                    label = labels[i]
+                    pred_label = labels[i]
                     score = scores[i]
-                    color = colors[label]
+                    color = colors[pred_label]
 
-                    cv2.rectangle(img_cv, (box[0], box[1]), (box[2], box[3]), color, 2)
-                    text = f"{class_names[label]}: {score:.2f}"
-                    cv2.putText(
-                        img_cv,
-                        text,
-                        (box[0], box[1] - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        color,
-                        2,
+                    # Lógica de comprobación de Acierto (IoU)
+                    is_correct = False
+                    if len(gt_boxes) > 0:
+                        box_t = torch.tensor(box).unsqueeze(0).float()
+                        gt_boxes_t = torch.tensor(gt_boxes).float()
+
+                        ious = torchvision.ops.box_iou(box_t, gt_boxes_t)[0]
+                        max_iou, max_idx = ious.max(dim=0)
+
+                        if max_iou >= 0.5:
+                            gt_label = gt_labels[max_idx.item()]
+                            if pred_label == gt_label:
+                                is_correct = True
+
+                    if is_correct:
+                        correct_predictions += 1
+
+                    # Dibujar Rectángulo principal
+                    cv2.rectangle(
+                        img_cv_pred, (box[0], box[1]), (box[2], box[3]), color, 2
                     )
 
-            # 1. EXTRAER TIPO DE IMAGEN DESDE EL NOMBRE DEL ARCHIVO
-            nombre_archivo = os.path.basename(paths[0])
-            if "post" in nombre_archivo.lower():
-                tipo_imagen = "POST-DESASTRE"
-            elif "pre" in nombre_archivo.lower():
-                tipo_imagen = "PRE-DESASTRE"
-            else:
-                tipo_imagen = "DESCONOCIDO"
+                    # Escribir Etiqueta
+                    text = f"{class_names[pred_label]} {score:.2f}"
+                    cv2.putText(
+                        img_cv_pred,
+                        text,
+                        (box[0], box[1] - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        color,
+                        1,
+                    )
 
-            # 2. LÓGICA EXTRA: ¿Ha detectado daños la red?
-            # Filtramos las etiquetas de las cajas que superaron el umbral
+                    # Dibujar CRUZ o CHECK
+                    cx = int((box[0] + box[2]) / 2)
+                    cy = int((box[1] + box[3]) / 2)
+
+                    if is_correct:
+                        # Check verde (✔)
+                        cv2.line(
+                            img_cv_pred, (cx - 4, cy), (cx - 1, cy + 4), (0, 255, 0), 2
+                        )
+                        cv2.line(
+                            img_cv_pred,
+                            (cx - 1, cy + 4),
+                            (cx + 5, cy - 4),
+                            (0, 255, 0),
+                            2,
+                        )
+                    else:
+                        # Cruz roja (❌)
+                        cv2.line(
+                            img_cv_pred,
+                            (cx - 4, cy - 4),
+                            (cx + 4, cy + 4),
+                            (0, 0, 255),
+                            2,
+                        )
+                        cv2.line(
+                            img_cv_pred,
+                            (cx + 4, cy - 4),
+                            (cx - 4, cy + 4),
+                            (0, 0, 255),
+                            2,
+                        )
+
+            # ==========================================
+            # PANEL 2: DIBUJAR GROUND TRUTH (REALIDAD)
+            # ==========================================
+            for i in range(len(gt_boxes)):
+                box = gt_boxes[i].astype(int)
+                gt_label = gt_labels[i]
+                color = colors[gt_label]
+
+                # Dibujar Rectángulo
+                cv2.rectangle(img_cv_gt, (box[0], box[1]), (box[2], box[3]), color, 2)
+
+                # Escribir Etiqueta (solo nombre, sin score)
+                text = f"{class_names[gt_label]}"
+                cv2.putText(
+                    img_cv_gt,
+                    text,
+                    (box[0], box[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                )
+
+            # --- VISUALIZACIÓN DOBLE (MATPLOTLIB) ---
+            nombre_archivo = os.path.basename(paths[0])
+            tipo_imagen = "POST" if "post" in nombre_archivo.lower() else "PRE"
+
             etiquetas_validas = [
                 labels[i] for i in range(len(boxes)) if scores[i] >= umbral
             ]
-            # Si hay alguna etiqueta > 1 (Minor, Major, o Destroyed), hay daños
-            hay_danos = any(etiqueta > 1 for etiqueta in etiquetas_validas)
+            hay_danos = any(et > 1 for et in etiquetas_validas)
+            estado_danos = "Daños" if hay_danos else "No Daños"
 
-            estado_danos = "¡DAÑOS DETECTADOS!" if hay_danos else "Todo parece intacto"
-
-            # 3. IMPRIMIR EN CONSOLA
-            print(f"Imagen [{tipo_imagen}]: {nombre_archivo}")
             print(
-                f" -> Objetos detectados (>={umbral}): {found_objects} | Estado: {estado_danos}\n"
+                f"Imagen: {nombre_archivo} -> Detectados: {found_objects} | Aciertos puros: {correct_predictions}"
             )
 
-            # 4. MOSTRAR CON MATPLOTLIB (CON TÍTULO DINÁMICO)
-            img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-            plt.figure(figsize=(10, 10))
-            plt.imshow(img_rgb)
+            # Convertir de BGR a RGB para Matplotlib
+            img_rgb_pred = cv2.cvtColor(img_cv_pred, cv2.COLOR_BGR2RGB)
+            img_rgb_gt = cv2.cvtColor(img_cv_gt, cv2.COLOR_BGR2RGB)
 
-            # Título principal indicando si es Pre o Post desastre
-            titulo = f"{tipo_imagen} | Umbral {umbral} | {estado_danos}"
-            plt.title(
-                titulo,
-                fontsize=14,
+            # Crear figura con 2 filas y 1 columna
+            fig, axes = plt.subplots(2, 1, figsize=(10, 16))
+
+            # Arriba: Predicciones
+            titulo_pred = f"PREDICCIONES ({tipo_imagen}) | Umbral {umbral} | {estado_danos} | Aciertos: {correct_predictions}/{found_objects}"
+            axes[0].imshow(img_rgb_pred)
+            axes[0].set_title(
+                titulo_pred,
+                fontsize=12,
                 fontweight="bold",
                 color="red" if hay_danos else "green",
             )
+            axes[0].axis("off")
 
-            plt.axis("off")
+            # Abajo: Ground Truth
+            titulo_gt = f"GROUND TRUTH"
+            axes[1].imshow(img_rgb_gt)
+            axes[1].set_title(titulo_gt, fontsize=12, fontweight="bold", color="blue")
+            axes[1].axis("off")
+
+            plt.tight_layout()
             plt.show()
 
 
