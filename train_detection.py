@@ -23,11 +23,8 @@ from torchvision.models.detection.rpn import AnchorGenerator
 
 import warnings
 
-warnings.filterwarnings("ignore")  # Para evitar los warnings molestos de PyTorch
+warnings.filterwarnings("ignore")
 
-# ==============================================================================
-# 1. CLASES DE DATASET (INTEGRADAS)
-# ==============================================================================
 
 DAMAGE_CLASSES = {
     "no-damage": 0,
@@ -92,9 +89,9 @@ class xBDDataset(Dataset):
         if self.max_size > 0:
             # Si estamos en test, semilla aleatoria. Si estamos en train, semilla fija.
             if "test" in self.split:
-                rng = np.random.RandomState()  # Aleatorio de verdad
+                rng = np.random.RandomState()
             else:
-                rng = np.random.RandomState(seed=42)  # Fijo para reproducibilidad
+                rng = np.random.RandomState(seed=42)
 
             idx = rng.permutation(range(len(self.image_pre_files)))
 
@@ -302,11 +299,6 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 
-# ==============================================================================
-# 2. CONSTRUCCIÓN DEL MODELO (VGG11 BACKBONE)
-# ==============================================================================
-
-
 def build_vgg_faster_rcnn(weights_path=None, num_classes=5):
     print("\nConstruyendo Backbone VGG11_bn para Detección...")
     vgg = models.vgg11_bn(weights=None)
@@ -322,7 +314,6 @@ def build_vgg_faster_rcnn(weights_path=None, num_classes=5):
 
     if weights_path and os.path.exists(weights_path):
         try:
-            # Aquí cargamos los pesos del modelo VGG11_bn (best_ft_net.pth)
             vgg.load_state_dict(
                 torch.load(weights_path, map_location="cpu", weights_only=True)
             )
@@ -352,16 +343,11 @@ def build_vgg_faster_rcnn(weights_path=None, num_classes=5):
     return model
 
 
-# ==============================================================================
-# 3. BUCLE DE ENTRENAMIENTO OPTIMIZADO
-# ==============================================================================
-
-
 def train_detection():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"==========================================")
-    print(f"Iniciando Entrenamiento Optimizado en {device}")
-    print(f"==========================================")
+    print("==========================================")
+    print("Iniciando Entrenamiento Optimizado en {device}")
+    print("==========================================")
 
     # Parches de 512x512 para ver contexto
     train_dataset = xBDDetectionDataset(
@@ -379,19 +365,16 @@ def train_detection():
     optimizer = optim.AdamW(params, lr=1e-4, weight_decay=1e-3)
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=15)
 
-    # Usamos AMP (Automatic Mixed Precision) para ahorrar otro ~40% de VRAM
     scaler = torch.amp.GradScaler("cuda")
 
-    accumulation_steps = (
-        4  # Emula un batch_size=4 actualizando los pesos cada 4 imágenes
-    )
+    accumulation_steps = 4
     num_epochs = 15
     best_loss = float("inf")
 
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0
-        optimizer.zero_grad()  # Inicializamos gradientes al empezar el epoch
+        optimizer.zero_grad()
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}")
 
@@ -411,13 +394,10 @@ def train_detection():
             with torch.amp.autocast("cuda"):
                 loss_dict = model(valid_images, valid_targets)
                 losses = sum(loss for loss in loss_dict.values())
-                # Dividimos la loss entre accumulation_steps para normalizar los gradientes
                 losses = losses / accumulation_steps
 
-            # Backward pass escalado
             scaler.scale(losses).backward()
 
-            # Acumulación: actualizamos solo cada 'accumulation_steps'
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
                 scaler.step(optimizer)
                 scaler.update()
@@ -437,21 +417,14 @@ def train_detection():
                 ">>> [GUARDADO] Nuevo mejor modelo guardado como 'best_detector_vgg.pth'\n"
             )
 
-        torch.cuda.empty_cache()  # Liberamos basura residual de VRAM al final del epoch
-
-
-# ==============================================================================
-# 4. INFERENCIA Y TESTEO
-# ==============================================================================
+        torch.cuda.empty_cache()
 
 
 def test_and_visualize():
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"==========================================")
-    print(
-        f"Iniciando Fase de Test y Visualización Doble (Predicciones vs Ground Truth)"
-    )
-    print(f"==========================================")
+    print("==========================================")
+    print("Iniciando Fase de Test y Visualización Doble (Predicciones vs Ground Truth)")
+    print("==========================================")
 
     model = build_vgg_faster_rcnn(None, num_classes=5)
     if os.path.exists("best_detector_vgg.pth"):
@@ -472,7 +445,6 @@ def test_and_visualize():
         test_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn
     )
 
-    # Clases abreviadas
     class_names = ["Fondo", "ND", "MinD", "MajD", "Dest"]
     colors = [(0, 0, 0), (0, 255, 0), (0, 255, 255), (255, 165, 0), (255, 0, 0)]
 
@@ -483,31 +455,24 @@ def test_and_visualize():
             with torch.amp.autocast("cuda"):
                 predictions = model([img_tensor])[0]
 
-            # 1. Predicciones
             boxes = predictions["boxes"].cpu().numpy()
             labels = predictions["labels"].cpu().numpy()
             scores = predictions["scores"].cpu().numpy()
 
-            # 2. Etiquetas Reales (Ground Truth)
             gt_boxes = targets[0]["boxes"].cpu().numpy()
             gt_labels = targets[0]["labels"].cpu().numpy()
 
-            umbral = 0.80
+            umbral = 0.5
 
-            # --- PREPARAMOS DOS COPIAS DE LA IMAGEN ---
             img_base = img_tensor.cpu().permute(1, 2, 0).numpy().copy()
             img_base = (img_base * 255).astype(np.uint8)
             img_base = cv2.cvtColor(img_base, cv2.COLOR_RGB2BGR)
 
-            img_cv_pred = img_base.copy()  # Para pintar lo que dice la red
-            img_cv_gt = img_base.copy()  # Para pintar la realidad
+            img_cv_pred = img_base.copy()
+            img_cv_gt = img_base.copy()
 
             found_objects = 0
             correct_predictions = 0
-
-            # ==========================================
-            # PANEL 1: DIBUJAR PREDICCIONES
-            # ==========================================
             for i in range(len(boxes)):
                 if scores[i] >= umbral:
                     found_objects += 1
@@ -516,7 +481,6 @@ def test_and_visualize():
                     score = scores[i]
                     color = colors[pred_label]
 
-                    # Lógica de comprobación de Acierto (IoU)
                     is_correct = False
                     if len(gt_boxes) > 0:
                         box_t = torch.tensor(box).unsqueeze(0).float()
@@ -533,12 +497,10 @@ def test_and_visualize():
                     if is_correct:
                         correct_predictions += 1
 
-                    # Dibujar Rectángulo principal
                     cv2.rectangle(
                         img_cv_pred, (box[0], box[1]), (box[2], box[3]), color, 2
                     )
 
-                    # Escribir Etiqueta
                     text = f"{class_names[pred_label]} {score:.2f}"
                     cv2.putText(
                         img_cv_pred,
@@ -550,12 +512,10 @@ def test_and_visualize():
                         1,
                     )
 
-                    # Dibujar CRUZ o CHECK
                     cx = int((box[0] + box[2]) / 2)
                     cy = int((box[1] + box[3]) / 2)
 
                     if is_correct:
-                        # Check verde (✔)
                         cv2.line(
                             img_cv_pred, (cx - 4, cy), (cx - 1, cy + 4), (0, 255, 0), 2
                         )
@@ -567,7 +527,6 @@ def test_and_visualize():
                             2,
                         )
                     else:
-                        # Cruz roja (❌)
                         cv2.line(
                             img_cv_pred,
                             (cx - 4, cy - 4),
@@ -583,18 +542,13 @@ def test_and_visualize():
                             2,
                         )
 
-            # ==========================================
-            # PANEL 2: DIBUJAR GROUND TRUTH (REALIDAD)
-            # ==========================================
             for i in range(len(gt_boxes)):
                 box = gt_boxes[i].astype(int)
                 gt_label = gt_labels[i]
                 color = colors[gt_label]
 
-                # Dibujar Rectángulo
                 cv2.rectangle(img_cv_gt, (box[0], box[1]), (box[2], box[3]), color, 2)
 
-                # Escribir Etiqueta (solo nombre, sin score)
                 text = f"{class_names[gt_label]}"
                 cv2.putText(
                     img_cv_gt,
@@ -606,7 +560,6 @@ def test_and_visualize():
                     1,
                 )
 
-            # --- VISUALIZACIÓN DOBLE (MATPLOTLIB) ---
             nombre_archivo = os.path.basename(paths[0])
             tipo_imagen = "POST" if "post" in nombre_archivo.lower() else "PRE"
 
@@ -617,18 +570,15 @@ def test_and_visualize():
             estado_danos = "Daños" if hay_danos else "No Daños"
 
             print(
-                f"Imagen: {nombre_archivo} -> Detectados: {found_objects} | Aciertos puros: {correct_predictions}"
+                "Imagen: {nombre_archivo} -> Detectados: {found_objects} | Aciertos puros: {correct_predictions}"
             )
 
-            # Convertir de BGR a RGB para Matplotlib
             img_rgb_pred = cv2.cvtColor(img_cv_pred, cv2.COLOR_BGR2RGB)
             img_rgb_gt = cv2.cvtColor(img_cv_gt, cv2.COLOR_BGR2RGB)
 
-            # Crear figura con 2 filas y 1 columna
             fig, axes = plt.subplots(2, 1, figsize=(10, 16))
 
-            # Arriba: Predicciones
-            titulo_pred = f"PREDICCIONES ({tipo_imagen}) | Umbral {umbral} | {estado_danos} | Aciertos: {correct_predictions}/{found_objects}"
+            titulo_pred = "PREDICCIONES ({tipo_imagen}) | Umbral {umbral} | {estado_danos} | Aciertos: {correct_predictions}/{found_objects}"
             axes[0].imshow(img_rgb_pred)
             axes[0].set_title(
                 titulo_pred,
@@ -638,8 +588,7 @@ def test_and_visualize():
             )
             axes[0].axis("off")
 
-            # Abajo: Ground Truth
-            titulo_gt = f"GROUND TRUTH"
+            titulo_gt = "GROUND TRUTH"
             axes[1].imshow(img_rgb_gt)
             axes[1].set_title(titulo_gt, fontsize=12, fontweight="bold", color="blue")
             axes[1].axis("off")
